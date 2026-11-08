@@ -1,0 +1,134 @@
+name: CI/CD - GitHub Pages
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
+
+jobs:
+  ci:
+    name: Validar site estático
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Baixar o repositório
+        uses: actions/checkout@v4
+
+      - name: Verificar estrutura e referências locais
+        run: |
+          python - <<'PY'
+          from html.parser import HTMLParser
+          from pathlib import Path
+          from urllib.parse import unquote, urlsplit
+
+          root = Path.cwd()
+          errors = []
+
+          required = [
+              root / "index.html",
+              root / "css",
+              root / "images",
+          ]
+
+          for path in required:
+              if not path.exists():
+                  errors.append(f"Item obrigatório ausente: {path.relative_to(root)}")
+
+          html_files = sorted(root.rglob("*.html"))
+          if not html_files:
+              errors.append("Nenhum arquivo HTML foi encontrado.")
+
+          class ReferenceParser(HTMLParser):
+              def __init__(self):
+                  super().__init__()
+                  self.references = []
+
+              def handle_starttag(self, tag, attrs):
+                  for name, value in attrs:
+                      if name in ("href", "src") and value:
+                          self.references.append(value.strip())
+
+          for html_file in html_files:
+              parser = ReferenceParser()
+              try:
+                  parser.feed(html_file.read_text(encoding="utf-8"))
+              except (UnicodeDecodeError, OSError) as error:
+                  errors.append(f"Não foi possível ler {html_file.relative_to(root)}: {error}")
+                  continue
+
+              for reference in parser.references:
+                  parsed = urlsplit(reference)
+
+                  if parsed.scheme or parsed.netloc or not parsed.path:
+                      continue
+
+                  if parsed.path.startswith("/"):
+                      errors.append(
+                          f"{html_file.relative_to(root)} contém caminho iniciado por '/': "
+                          f"{reference}"
+                      )
+                      continue
+
+                  target = (html_file.parent / unquote(parsed.path)).resolve()
+
+                  if not target.exists():
+                      errors.append(
+                          f"Referência local inexistente em {html_file.relative_to(root)}: "
+                          f"{reference}"
+                      )
+
+          if errors:
+              print("Verificação reprovada:")
+              for error in errors:
+                  print(f"- {error}")
+              raise SystemExit(1)
+
+          print(f"Verificação concluída: {len(html_files)} arquivos HTML encontrados.")
+          PY
+
+  deploy:
+    name: Publicar no GitHub Pages
+    needs: ci
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Baixar o repositório
+        uses: actions/checkout@v4
+
+      - name: Configurar GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Preparar arquivos do site
+        run: |
+          mkdir _site
+          cp ./*.html _site/
+          cp -R css images pages _site/
+
+      - name: Enviar arquivos para publicação
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - name: Publicar no GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
